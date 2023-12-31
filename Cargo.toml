@@ -1,0 +1,22 @@
+[package]
+name = "frclib-commands"
+version = "0.1.0"
+edition = "2021"
+description = "A library for writing FRC robot code in Rust"
+license = "MIT"
+authors = [
+    "Bowan Foryt"
+]
+keywords = [
+    "FRC",
+    "Robotics",
+    "First",
+    "WPILib",
+]
+categories = [
+    "robotics",
+    "hardware"
+]
+
+[dependencies]
+thiserror = "1.0.53"
