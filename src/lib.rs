@@ -28,6 +28,9 @@
 //! }
 //! ```
 
+//TODO: when frclib-core is public this has to rely on that for its time
+
+
 #[macro_use]
 pub mod manager;
 pub mod commands;

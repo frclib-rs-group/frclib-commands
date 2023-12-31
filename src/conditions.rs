@@ -94,7 +94,6 @@ impl Condition {
     /// due to being on a different thread.
     #[allow(clippy::return_self_not_must_use, clippy::must_use_candidate)]
     pub fn on_true(&self, command: Command) -> Self {
-        //create a condition is true if last poll was false and current poll is true
         let last_poll = Cell::new(false);
         let slf_cond = self.cond.clone();
         let condition = Self::new(move || {
@@ -117,7 +116,6 @@ impl Condition {
     /// due to being on a different thread.
     #[allow(clippy::return_self_not_must_use, clippy::must_use_candidate)]
     pub fn on_false(&self, command: Command) -> Self {
-        //create a condition is true if last poll was false and current poll is true
         let last_poll = Cell::new(false);
         let slf_cond = self.cond.clone();
         let condition = Self::new(move || {
