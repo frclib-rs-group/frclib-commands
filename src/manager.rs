@@ -1,13 +1,14 @@
 use std::{
-    cell::{UnsafeCell, RefCell},
+    cell::{RefCell, UnsafeCell},
     collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
     ops::{Deref, DerefMut},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use super::{commands::CommandTrait, Command, WrongThreadError, conditions::ConditionalScheduler};
+use super::{commands::CommandTrait, conditions::ConditionalScheduler, Command, WrongThreadError};
 
-pub type SubsystemSUID = u8;
+pub type SubsystemSUID = u64;
 
 struct ManagerQueue {
     cmd_queue: Vec<Command>,
@@ -18,7 +19,7 @@ thread_local! {
 }
 
 /// Puts a command in the queue to be scheduled next time the scheduler runs
-/// 
+///
 /// # Errors
 /// - [`WrongThreadError`] if the current thread does not have a command manager
 pub fn schedule(command: Command) -> Result<(), WrongThreadError> {
@@ -27,13 +28,15 @@ pub fn schedule(command: Command) -> Result<(), WrongThreadError> {
             queue.cmd_queue.push(command);
             Ok(())
         } else {
-            Err(WrongThreadError("Can only schedule commands on a thread that has a command manager"))
+            Err(WrongThreadError(
+                "Can only schedule commands on a thread that has a command manager",
+            ))
         }
     })
 }
 
 /// Puts a conditional scheduler in the queue to be added next time the scheduler runs
-/// 
+///
 /// # Errors
 /// - [`WrongThreadError`] if the current thread does not have a command manager
 pub(crate) fn add_cond_scheduler(scheduler: ConditionalScheduler) -> Result<(), WrongThreadError> {
@@ -42,29 +45,51 @@ pub(crate) fn add_cond_scheduler(scheduler: ConditionalScheduler) -> Result<(), 
             queue.cond_queue.push(scheduler);
             Ok(())
         } else {
-            Err(WrongThreadError("Can only schedule commands on a thread that has a command manager"))
+            Err(WrongThreadError(
+                "Can only schedule commands on a thread that has a command manager",
+            ))
         }
     })
 }
 
-pub trait SubsystemBase {
-    fn periodic(&self, _: Duration) {}
-}
-
-pub trait Subsystem: SubsystemBase {
-    const SUID: SubsystemSUID;
-
+pub trait Subsystem {
+    /// The name of the subsystem, mainly used for logging
+    /// but also has to be unique for the subsystem to be registered.
     fn name(&self) -> &'static str {
         std::any::type_name::<Self>()
     }
 
+    /// Constructs the subsystem, called when the subsystem is registered.
     fn construct() -> Self;
 
+    /// Called every cycle by the command manager.
+    fn periodic(&self, _: Duration) {}
+
+    /// The default command for the subsystem, if any.
+    /// The default command is scheduled whenever no other command is scheduled for the subsystem.
     fn default_command(&mut self) -> Option<Command> {
         None
     }
 
-    fn log(&self);
+    /// Called every cycle by the command manager, after [`periodic`](Subsystem::periodic).
+    /// Helps with cluttering the [`periodic`](Subsystem::periodic) function.
+    fn log(&self) {}
+
+    /// A unique identifier for the subsystem. Only used internally.
+    fn suid(&self) -> SubsystemSUID {
+        let mut hasher = fxhash::FxHasher::default();
+        self.name().hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+pub trait SubsystemRequirement {
+    fn suid(&self) -> SubsystemSUID;
+}
+impl<T: Subsystem> SubsystemRequirement for SubsystemCell<T> {
+    fn suid(&self) -> SubsystemSUID {
+        self.get().suid()
+    }
 }
 
 /// This type completely disregards mutable safety as it cannot be transferred between threads.
@@ -73,24 +98,23 @@ pub trait Subsystem: SubsystemBase {
 /// This type is also not really an RC, it will never fully drop the subsystem to prevent
 /// null pointer errors in the manager.
 #[derive(Debug)]
-pub struct SubsystemCell<T: SubsystemBase + 'static>(&'static UnsafeCell<T>);
+pub struct SubsystemCell<T: Subsystem + 'static>(&'static UnsafeCell<T>);
 
-impl<T: SubsystemBase + 'static> Clone for SubsystemCell<T> {
+impl<T: Subsystem + 'static> Clone for SubsystemCell<T> {
     fn clone(&self) -> Self {
         Self(self.0)
     }
 }
-impl<T: SubsystemBase + 'static> Copy for SubsystemCell<T> {}
+impl<T: Subsystem + 'static> Copy for SubsystemCell<T> {}
 
-
-impl<T: SubsystemBase> Deref for SubsystemCell<T> {
+impl<T: Subsystem> Deref for SubsystemCell<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.0.get() }
     }
 }
 
-impl<T: SubsystemBase> DerefMut for SubsystemCell<T> {
+impl<T: Subsystem> DerefMut for SubsystemCell<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.0.get() }
     }
@@ -98,13 +122,14 @@ impl<T: SubsystemBase> DerefMut for SubsystemCell<T> {
 
 impl<T: Subsystem + 'static> SubsystemCell<T> {
     /// Creates a new subsystem cell, immortalizes the subsystem and registers it with the command manager.
-    /// 
+    ///
     /// # Panics
     /// If the subsystem is already registered with the command manager.
     #[must_use]
     pub fn generate(manager: &mut CommandManager) -> Self {
         let slf = Self(Box::leak(Box::new(UnsafeCell::new(T::construct()))));
-        manager.register_subsystem(&slf, slf.get_mut().default_command())
+        manager
+            .register_subsystem(&slf, slf.get_mut().default_command())
             .expect("Subsystem already registered");
         slf
     }
@@ -118,13 +143,18 @@ impl<T: Subsystem + 'static> SubsystemCell<T> {
     #[must_use]
     #[allow(clippy::mut_from_ref)]
     /// Allows for interior mutability of the subsystem.
+    ///
+    /// # Safety
+    /// This breaks rust's mutability rules, you can have multiple mutable references to the subsystem.
+    /// Multiple mutable references to the subsystem can cause undefined behavior if not handled correctly.
+    /// Subsystems are not Send or Sync so this should not be a problem.
     pub fn get_mut(&self) -> &mut T {
         unsafe { &mut *self.0.get() }
     }
     #[must_use]
     #[doc(hidden)]
     #[allow(clippy::missing_const_for_fn)]
-    pub unsafe fn immortal_mut(&self) -> *mut T {
+    pub(crate) unsafe fn immortal_mut(&self) -> *mut T {
         self.0.get()
     }
 }
@@ -143,17 +173,18 @@ pub enum CommandIndex {
     PreservedCommand(usize),
 }
 
-#[derive(Debug)]
+use fxhash::{FxHashMap, FxHashSet};
+
 pub struct CommandManager {
-    periodic_callbacks: Vec<*mut dyn SubsystemBase>,
+    periodic_callbacks: Vec<(Box<dyn FnMut(Duration)>, Option<Instant>)>,
     commands: Vec<Option<Command>>,
     default_commands: Vec<Option<Command>>,
     preserved_commands: Vec<Option<Command>>,
-    interrupt_state: HashMap<CommandIndex, bool>,
-    subsystem_to_default: HashMap<SubsystemSUID, CommandIndex>,
-    requirements: HashMap<SubsystemSUID, CommandIndex>,
-    initialized_commands: HashSet<CommandIndex>,
-    orphaned_commands: HashSet<CommandIndex>,
+    interrupt_state: FxHashMap<CommandIndex, bool>,
+    subsystem_to_default: FxHashMap<SubsystemSUID, CommandIndex>,
+    requirements: FxHashMap<SubsystemSUID, CommandIndex>,
+    initialized_commands: FxHashSet<CommandIndex>,
+    orphaned_commands: FxHashSet<CommandIndex>,
     cond_schedulers: Vec<ConditionalScheduler>,
 }
 impl CommandManager {
@@ -170,11 +201,11 @@ impl CommandManager {
             commands: Vec::new(),
             default_commands: Vec::new(),
             preserved_commands: Vec::new(),
-            interrupt_state: HashMap::new(),
-            subsystem_to_default: HashMap::new(),
-            requirements: HashMap::new(),
-            initialized_commands: HashSet::new(),
-            orphaned_commands: HashSet::new(),
+            interrupt_state: HashMap::with_hasher(fxhash::FxBuildHasher::default()),
+            subsystem_to_default: HashMap::with_hasher(fxhash::FxBuildHasher::default()),
+            requirements: HashMap::with_hasher(fxhash::FxBuildHasher::default()),
+            initialized_commands: HashSet::with_hasher(fxhash::FxBuildHasher::default()),
+            orphaned_commands: HashSet::with_hasher(fxhash::FxBuildHasher::default()),
             cond_schedulers: Vec::new(),
         }
     }
@@ -188,15 +219,20 @@ impl CommandManager {
         subsystem: &SubsystemCell<T>,
         default_command: Option<Command>,
     ) -> Result<(), CommandManagerError> {
-        if self.subsystem_to_default.contains_key(&T::SUID) {
+        if self.subsystem_to_default.contains_key(&subsystem.suid()) {
             return Err(CommandManagerError::SubsystemAlreadyRegistered);
         }
-        self.periodic_callbacks
-            .push(unsafe { subsystem.immortal_mut() });
+        let immortal_mut = unsafe { subsystem.immortal_mut() };
+        self.periodic_callbacks.push((
+            Box::new(move |dt| unsafe {
+                (&mut *immortal_mut).periodic(dt);
+            }),
+            None,
+        ));
         self.default_commands.push(default_command);
         let idx = self.default_commands.len() - 1;
         self.subsystem_to_default
-            .insert(T::SUID, CommandIndex::DefaultCommand(idx));
+            .insert(subsystem.suid(), CommandIndex::DefaultCommand(idx));
         self.interrupt_state
             .insert(CommandIndex::DefaultCommand(idx), false);
         Ok(())
@@ -212,12 +248,14 @@ impl CommandManager {
     }
 
     fn run_subsystems(&mut self) {
-        for callback in &self.periodic_callbacks {
-            unsafe {
-                callback.as_ref()
-                    .expect("Internal State Error: Subsystem not found")
-                    .periodic(Duration::from_secs(0));
+        for callback in &mut self.periodic_callbacks {
+            if let Some(last_run) = callback.1 {
+                let dt = last_run.elapsed();
+                callback.0(dt);
+            } else {
+                callback.0(Duration::from_secs(0));
             }
+            callback.1 = Some(Instant::now());
         }
         for (suid, cmd_idx) in &self.subsystem_to_default {
             if !self.requirements.contains_key(suid) {
@@ -227,7 +265,8 @@ impl CommandManager {
     }
 
     fn run_cond_schedulers(&mut self) {
-        let to_schedule = self.cond_schedulers
+        let to_schedule = self
+            .cond_schedulers
             .iter_mut()
             .filter_map(ConditionalScheduler::poll)
             .collect::<Vec<_>>();
@@ -249,17 +288,22 @@ impl CommandManager {
             } {
                 if self.interrupt_state[index] {
                     command.end(true);
-                    if let CommandIndex::Command(idx) = *index { to_remove.push(idx) }
+                    if let CommandIndex::Command(idx) = *index {
+                        to_remove.push(idx)
+                    }
                     continue;
                 }
                 if !self.initialized_commands.contains(index) {
                     command.init();
                     self.initialized_commands.insert(*index);
                 }
+                //TODO: Add dt to periodic
                 command.periodic(Duration::from_secs(0));
                 if command.is_finished() {
                     command.end(false);
-                    if let CommandIndex::Command(idx) = *index { to_remove.push(idx) }
+                    if let CommandIndex::Command(idx) = *index {
+                        to_remove.push(idx)
+                    }
                 }
             }
         }
@@ -298,8 +342,13 @@ impl CommandManager {
     fn get_command(&mut self, index: CommandIndex) -> Option<&mut Command> {
         match index {
             CommandIndex::Command(idx) => self.commands.get_mut(idx).and_then(Option::as_mut),
-            CommandIndex::DefaultCommand(idx) => self.default_commands.get_mut(idx).and_then(Option::as_mut),
-            CommandIndex::PreservedCommand(idx) => self.preserved_commands.get_mut(idx).and_then(Option::as_mut),
+            CommandIndex::DefaultCommand(idx) => {
+                self.default_commands.get_mut(idx).and_then(Option::as_mut)
+            }
+            CommandIndex::PreservedCommand(idx) => self
+                .preserved_commands
+                .get_mut(idx)
+                .and_then(Option::as_mut),
         }
     }
 
@@ -323,7 +372,8 @@ impl CommandManager {
     }
 
     fn inner_schedule(&mut self, index: CommandIndex) {
-        let req = &self.get_command(index)
+        let req = &self
+            .get_command(index)
             .expect("Internal State Error: Command not found")
             .get_requirements()[..];
         if req.is_empty() {

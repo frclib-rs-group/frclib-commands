@@ -1,14 +1,14 @@
 //! A library for creating and managing commands.
-//! 
+//!
 //! Designed to be used in a single-threaded environment and to be very lightweight.
-//! 
+//!
 //! # Examples
-//! 
+//!
 //! ## Creating a command manager and scheduling a command
 //! ```
 //! use frclib_commands::{CommandBuilder, CommandManager};
 //! use std::time::Duration;
-//! 
+//!
 //! fn main() {
 //!    let mut manager = CommandManager::new();
 //!
@@ -20,16 +20,13 @@
 //!       .build()
 //!       .timeout(Duration::from_secs(1))
 //!       .schedule();
-//! 
+//!
 //!   for _ in 0..10 {
 //!     manager.run();
 //!     std::thread::sleep(Duration::from_millis(95));
 //!   }
 //! }
 //! ```
-
-
-
 
 #[macro_use]
 pub mod manager;
@@ -41,8 +38,6 @@ mod test;
 pub use commands::*;
 pub use manager::*;
 
-
-
 #[derive(Debug, Clone, Copy)]
 pub struct WrongThreadError(&'static str);
 impl std::fmt::Display for WrongThreadError {
@@ -51,8 +46,6 @@ impl std::fmt::Display for WrongThreadError {
     }
 }
 impl std::error::Error for WrongThreadError {}
-
-
 
 /// A macro that makes it more ergonomic to "move" Clonable's into closures.
 ///

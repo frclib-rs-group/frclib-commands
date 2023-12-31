@@ -19,14 +19,7 @@ fn test_manager() {
         string: String,
         boolean: bool,
     }
-    impl SubsystemBase for TestSubsystem {
-        fn periodic(&self, period: Duration) {
-            println!("Periodic: {period:?}");
-        }
-    }
     impl Subsystem for TestSubsystem {
-        const SUID: SubsystemSUID = 11;
-
         fn construct() -> Self {
             Self {
                 integer: 0,
@@ -35,12 +28,27 @@ fn test_manager() {
             }
         }
 
-        fn log(&self) {
+        fn periodic(&self, period: Duration) {
+            println!("Periodic: {period:?}");
+        }
+
+        fn log(&self) {}
+    }
+
+    struct DummySubsystem;
+    impl Subsystem for DummySubsystem {
+        fn construct() -> Self {
+            Self
         }
     }
 
     let mut manager = CommandManager::new();
     let subsystem = SubsystemCell::<TestSubsystem>::generate(&mut manager);
+    let dummy_subsystem = SubsystemCell::<DummySubsystem>::generate(&mut manager);
+
+    for _ in 0..5 {
+        println!("{:?}", subsystem.suid())
+    }
 
     let command = Command::Custom(Box::new(TestCommand {
         name: "Test".to_owned(),
@@ -65,8 +73,8 @@ fn test_manager() {
             variable,
             variable2 >> || println!("Cmd Init: {variable:?} {variable2:?}")
         ))
-        //subsystems impl copy so we can easily move them into closures
         .end(move |_| println!("Cmd End for subsystem: {:?}", subsystem.name()))
+        .with_subsystems(&[&subsystem, &dummy_subsystem])
         .build()
         .schedule();
 

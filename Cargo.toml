@@ -19,4 +19,5 @@ categories = [
 ]
 
 [dependencies]
+fxhash = "0.2.1"
 thiserror = "1.0.53"

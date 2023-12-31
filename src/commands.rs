@@ -1,5 +1,9 @@
 use std::{collections::HashSet, fmt::Debug, time::Duration};
 
+use crate::{SubsystemRequirement, SubsystemSUID};
+pub type Requirement<'a> = &'a dyn SubsystemRequirement;
+pub type Requirements<'a, 'b> = &'a [Requirement<'b>];
+
 pub trait CommandTrait {
     /// Called when the command is first scheduled.
     fn init(&mut self) {}
@@ -15,8 +19,9 @@ pub trait CommandTrait {
         false
     }
 
+    // Eventually we should move this over to Box<[SubsystemSUID]>
     /// Returns the requirements of this command.
-    fn get_requirements(&self) -> Vec<u8> {
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
         Vec::new()
     }
 
@@ -32,16 +37,38 @@ pub trait CommandTrait {
 
     /// Returns the name of this command.
     fn get_name(&self) -> String {
-        String::from("unnamed command")
+        String::from("Unnamed Command")
     }
 }
 
+/// A builder for creating commands.
+/// Allows for chaining of functions to create a command.
+///
+/// # Examples
+/// ```
+/// use frclib_commands::{CommandBuilder, CommandManager};
+///
+/// fn main() {
+///     let mut manager = CommandManager::new();
+///
+///     CommandBuilder::new()
+///         .init(|| println!("Init"))
+///         .periodic(|period| {
+///             println!("Periodic: {:?}", period);
+///         })
+///        .end(|interrupted| println!("End: {}", interrupted))
+///        .is_finished(|| true)
+///        .build()
+///        .schedule();
+///
+///     manager.run();
+/// }
 pub struct CommandBuilder {
     init: Option<Box<dyn FnMut()>>,
     periodic: Option<Box<dyn FnMut(Duration)>>,
     end: Option<Box<dyn FnMut(bool)>>,
     is_finished: Option<Box<dyn FnMut() -> bool>>,
-    requirements: Vec<u8>,
+    requirements: Vec<SubsystemSUID>,
 }
 impl Debug for CommandBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
@@ -56,7 +83,7 @@ impl Debug for CommandBuilder {
 }
 
 impl CommandBuilder {
-    /// Creates a new command builder with no requirements and no functions. 
+    /// Creates a new command builder with no requirements and no functions.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -100,15 +127,21 @@ impl CommandBuilder {
         self
     }
 
-    /// Defines the requirements for this command.
-    /// This is a chainable function for ease of use.
     #[must_use]
-    pub fn with_requirements(mut self, requirements: Vec<u8>) -> Self {
-        self.requirements = requirements;
+    pub fn with_subsystem(mut self, subsystem: Requirement) -> Self {
+        self.requirements.push(subsystem.suid());
+        self
+    }
+
+    #[must_use]
+    pub fn with_subsystems(mut self, subsystems: Requirements) -> Self {
+        self.requirements
+            .extend(subsystems.iter().map(|s| s.suid()));
         self
     }
 
     /// Builds the command.
+    /// This is not chainable and consumes the builder.
     pub fn build(self) -> Command {
         Command::Simple(SimpleCommand {
             init: self.init,
@@ -120,110 +153,111 @@ impl CommandBuilder {
     }
 }
 
+/// CommandBuilder methods for creating commands with different combinations of functions.
 impl CommandBuilder {
-    pub fn start_only(init: impl FnMut() + 'static, requirements: Vec<u8>) -> Command {
-        Self::new()
-            .init(init)
-            .with_requirements(requirements)
-            .build()
+    pub fn init_only(init: impl FnMut() + 'static, subsystems: Requirements) -> Command {
+        Self::new().init(init).with_subsystems(subsystems).build()
     }
 
-    pub fn run_only(periodic: impl FnMut(Duration) + 'static, requirements: Vec<u8>) -> Command {
+    pub fn periodic_only(
+        periodic: impl FnMut(Duration) + 'static,
+        subsystems: Requirements,
+    ) -> Command {
         Self::new()
             .periodic(periodic)
-            .with_requirements(requirements)
+            .with_subsystems(subsystems)
             .build()
     }
 
-    pub fn end_only(end: impl FnMut(bool) + 'static, requirements: Vec<u8>) -> Command {
-        Self::new().end(end).with_requirements(requirements).build()
+    pub fn end_only(end: impl FnMut(bool) + 'static, subsystems: Requirements) -> Command {
+        Self::new().end(end).with_subsystems(subsystems).build()
     }
 
-    pub fn run_start(
+    pub fn init_periodic(
         init: impl FnMut() + 'static,
         periodic: impl FnMut(Duration) + 'static,
-        requirements: Vec<u8>,
+        subsystems: Requirements,
     ) -> Command {
         Self::new()
             .init(init)
             .periodic(periodic)
-            .with_requirements(requirements)
+            .with_subsystems(subsystems)
             .build()
     }
 
-    pub fn run_end(
+    pub fn periodic_end(
         periodic: impl FnMut(Duration) + 'static,
         end: impl FnMut(bool) + 'static,
-        requirements: Vec<u8>,
+        subsystems: Requirements,
     ) -> Command {
         Self::new()
             .periodic(periodic)
             .end(end)
-            .with_requirements(requirements)
+            .with_subsystems(subsystems)
             .build()
     }
 
-    pub fn start_end(
+    pub fn init_end(
         init: impl FnMut() + 'static,
         end: impl FnMut(bool) + 'static,
-        requirements: Vec<u8>,
+        subsystems: Requirements,
     ) -> Command {
         Self::new()
             .init(init)
             .end(end)
-            .with_requirements(requirements)
+            .with_subsystems(subsystems)
             .build()
     }
 
-    pub fn run_start_end(
+    pub fn init_periodic_end(
         init: impl FnMut() + 'static,
         periodic: impl FnMut(Duration) + 'static,
         end: impl FnMut(bool) + 'static,
-        requirements: Vec<u8>,
+        subsystems: Requirements,
     ) -> Command {
         Self::new()
             .init(init)
             .periodic(periodic)
             .end(end)
-            .with_requirements(requirements)
+            .with_subsystems(subsystems)
             .build()
     }
 
     pub fn run_until(
-        is_finished: impl FnMut() -> bool + 'static,
         periodic: impl FnMut(Duration) + 'static,
-        requirements: Vec<u8>,
+        is_finished: impl FnMut() -> bool + 'static,
+        subsystems: Requirements,
     ) -> Command {
         Self::new()
             .is_finished(is_finished)
             .periodic(periodic)
-            .with_requirements(requirements)
+            .with_subsystems(subsystems)
             .build()
     }
 
-    pub fn run_end_until(
+    pub fn periodic_end_until(
         is_finished: impl FnMut() -> bool + 'static,
         periodic: impl FnMut(Duration) + 'static,
         end: impl FnMut(bool) + 'static,
-        requirements: Vec<u8>,
+        subsystems: Requirements,
     ) -> Command {
         Self::new()
             .is_finished(is_finished)
             .periodic(periodic)
             .end(end)
-            .with_requirements(requirements)
+            .with_subsystems(subsystems)
             .build()
     }
 
-    pub fn start_run_until(
+    pub fn init_periodic_until(
         init: impl FnMut() + 'static,
         is_finished: impl FnMut() -> bool + 'static,
-        requirements: Vec<u8>,
+        subsystems: Requirements,
     ) -> Command {
         Self::new()
             .init(init)
             .is_finished(is_finished)
-            .with_requirements(requirements)
+            .with_subsystems(subsystems)
             .build()
     }
 
@@ -232,14 +266,14 @@ impl CommandBuilder {
         periodic: impl FnMut(Duration) + 'static,
         end: impl FnMut(bool) + 'static,
         is_finished: impl FnMut() -> bool + 'static,
-        requirements: Vec<u8>,
+        subsystems: Requirements,
     ) -> Command {
         Self::new()
             .init(init)
             .periodic(periodic)
             .end(end)
             .is_finished(is_finished)
-            .with_requirements(requirements)
+            .with_subsystems(subsystems)
             .build()
     }
 }
@@ -249,7 +283,7 @@ pub struct SimpleCommand {
     periodic: Option<Box<dyn FnMut(Duration)>>,
     end: Option<Box<dyn FnMut(bool)>>,
     is_finished: Option<Box<dyn FnMut() -> bool>>,
-    requirements: Vec<u8>,
+    requirements: Vec<SubsystemSUID>,
 }
 impl CommandTrait for SimpleCommand {
     fn init(&mut self) {
@@ -276,7 +310,7 @@ impl CommandTrait for SimpleCommand {
             .map_or(false, |is_finished| is_finished())
     }
 
-    fn get_requirements(&self) -> Vec<u8> {
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
         self.requirements.clone()
     }
 }
@@ -298,7 +332,7 @@ pub struct ConstCommand {
     periodic: Option<fn(Duration)>,
     end: Option<fn(bool)>,
     is_finished: Option<fn() -> bool>,
-    requirements: &'static [u8],
+    requirements: &'static [SubsystemSUID],
 }
 impl CommandTrait for ConstCommand {
     fn init(&mut self) {
@@ -325,7 +359,7 @@ impl CommandTrait for ConstCommand {
             .map_or(false, |is_finished| is_finished())
     }
 
-    fn get_requirements(&self) -> Vec<u8> {
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
         self.requirements.to_vec()
     }
 }
@@ -345,7 +379,7 @@ impl Debug for ConstCommand {
 pub struct ParallelCommand {
     commands: Vec<Command>,
     finished: Vec<bool>,
-    requirements: HashSet<u8>,
+    requirements: HashSet<SubsystemSUID>,
     race: bool,
 }
 impl CommandTrait for ParallelCommand {
@@ -386,7 +420,7 @@ impl CommandTrait for ParallelCommand {
         }
     }
 
-    fn get_requirements(&self) -> Vec<u8> {
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
         self.requirements.clone().into_iter().collect()
     }
 
@@ -403,14 +437,26 @@ impl CommandTrait for ParallelCommand {
 pub struct SequentialCommand {
     commands: Vec<Command>,
     current: usize,
-    requirements: HashSet<u8>,
+    requirements: HashSet<SubsystemSUID>,
+}
+impl SequentialCommand {
+    fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
 }
 impl CommandTrait for SequentialCommand {
     fn init(&mut self) {
-        self.commands[self.current].init();
+        if self.is_empty() {
+            return;
+        }
+        self.current = 0;
+        self.commands[0].init();
     }
 
     fn periodic(&mut self, period: Duration) {
+        if self.is_empty() {
+            return;
+        }
         self.commands[self.current].periodic(period);
         if self.commands[self.current].is_finished() {
             self.commands[self.current].end(false);
@@ -433,7 +479,7 @@ impl CommandTrait for SequentialCommand {
         self.current >= self.commands.len()
     }
 
-    fn get_requirements(&self) -> Vec<u8> {
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
         self.requirements.clone().into_iter().collect()
     }
 
@@ -449,7 +495,7 @@ impl CommandTrait for SequentialCommand {
 pub struct ProxyCommand {
     command_supplier: Box<dyn FnMut() -> Command>,
     command: Option<Box<Command>>,
-    requirements: HashSet<u8>,
+    requirements: HashSet<SubsystemSUID>,
 }
 impl ProxyCommand {
     fn get_command(&mut self) -> &mut Command {
@@ -461,6 +507,7 @@ impl ProxyCommand {
 }
 impl CommandTrait for ProxyCommand {
     fn init(&mut self) {
+        self.command = None;
         self.get_command().init();
     }
 
@@ -476,25 +523,28 @@ impl CommandTrait for ProxyCommand {
         self.get_command().is_finished()
     }
 
-    fn get_requirements(&self) -> Vec<u8> {
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
         self.requirements.iter().copied().collect()
     }
 
     fn get_name(&self) -> String {
-        self.command.as_ref()
-            .map_or_else(
-                || String::from("ProxyCommand(?)"),
-                |c| format!("ProxyCommand({})", c.get_name())
-            )
+        self.command.as_ref().map_or_else(
+            || String::from("ProxyCommand(?)"),
+            |c| format!("ProxyCommand({})", c.get_name()),
+        )
     }
 }
 impl Debug for ProxyCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         let mut dbg_struct = f.debug_struct("ProxyCommand");
         if let Some(command) = &self.command {
-            dbg_struct.field("command", command).finish_non_exhaustive()?;
+            dbg_struct
+                .field("command", command)
+                .finish_non_exhaustive()?;
         } else {
-            dbg_struct.field("command", &"None").finish_non_exhaustive()?;
+            dbg_struct
+                .field("command", &"None")
+                .finish_non_exhaustive()?;
         };
         Ok(())
     }
@@ -518,7 +568,7 @@ impl CommandTrait for WaitCommand {
         self.start_instant.expect("Command Empty").elapsed() >= self.duration
     }
 
-    fn get_requirements(&self) -> Vec<u8> {
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
         vec![]
     }
 
@@ -549,12 +599,47 @@ impl CommandTrait for NamedCommand {
         self.command.is_finished()
     }
 
-    fn get_requirements(&self) -> Vec<u8> {
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
         self.command.get_requirements()
     }
 
     fn get_name(&self) -> String {
         self.name.clone()
+    }
+}
+
+#[derive(Debug)]
+pub struct ExtraRequirementsCommand {
+    command: Box<Command>,
+    requirements: Vec<SubsystemSUID>,
+}
+impl CommandTrait for ExtraRequirementsCommand {
+    fn init(&mut self) {
+        self.command.init();
+    }
+
+    fn periodic(&mut self, period: Duration) {
+        self.command.periodic(period);
+    }
+
+    fn end(&mut self, interrupted: bool) {
+        self.command.end(interrupted);
+    }
+
+    fn is_finished(&mut self) -> bool {
+        self.command.is_finished()
+    }
+
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
+        self.command
+            .get_requirements()
+            .into_iter()
+            .chain(self.requirements.iter().copied())
+            .collect()
+    }
+
+    fn get_name(&self) -> String {
+        self.command.get_name()
     }
 }
 
@@ -568,6 +653,7 @@ pub enum Command {
     Named(NamedCommand),
     Wait(WaitCommand),
     Proxy(ProxyCommand),
+    ExtraRequirments(ExtraRequirementsCommand),
 }
 impl Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
@@ -586,6 +672,10 @@ impl Debug for Command {
             Self::Named(command) => f.debug_struct("Named").field("command", command).finish(),
             Self::Wait(command) => f.debug_struct("Wait").field("command", command).finish(),
             Self::Proxy(command) => f.debug_struct("Proxy").field("command", command).finish(),
+            Self::ExtraRequirments(command) => f
+                .debug_struct("ExtraRequirments")
+                .field("command", command)
+                .finish(),
         }
     }
 }
@@ -600,6 +690,7 @@ impl CommandTrait for Command {
             Self::Named(command) => command.init(),
             Self::Wait(command) => command.init(),
             Self::Proxy(command) => command.init(),
+            Self::ExtraRequirments(command) => command.init(),
         }
     }
 
@@ -613,6 +704,7 @@ impl CommandTrait for Command {
             Self::Named(command) => command.periodic(period),
             Self::Wait(command) => command.periodic(period),
             Self::Proxy(command) => command.periodic(period),
+            Self::ExtraRequirments(command) => command.periodic(period),
         }
     }
 
@@ -626,6 +718,7 @@ impl CommandTrait for Command {
             Self::Named(command) => command.end(interrupted),
             Self::Wait(command) => command.end(interrupted),
             Self::Proxy(command) => command.end(interrupted),
+            Self::ExtraRequirments(command) => command.end(interrupted),
         }
     }
 
@@ -639,10 +732,11 @@ impl CommandTrait for Command {
             Self::Named(command) => command.is_finished(),
             Self::Wait(command) => command.is_finished(),
             Self::Proxy(command) => command.is_finished(),
+            Self::ExtraRequirments(command) => command.is_finished(),
         }
     }
 
-    fn get_requirements(&self) -> Vec<u8> {
+    fn get_requirements(&self) -> Vec<SubsystemSUID> {
         match self {
             Self::Parallel(command) => command.get_requirements(),
             Self::Sequential(command) => command.get_requirements(),
@@ -652,6 +746,7 @@ impl CommandTrait for Command {
             Self::Named(command) => command.get_requirements(),
             Self::Wait(command) => command.get_requirements(),
             Self::Proxy(command) => command.get_requirements(),
+            Self::ExtraRequirments(command) => command.get_requirements(),
         }
     }
 
@@ -665,6 +760,7 @@ impl CommandTrait for Command {
             Self::Named(command) => command.get_name(),
             Self::Wait(command) => command.get_name(),
             Self::Proxy(command) => command.get_name(),
+            Self::ExtraRequirments(command) => command.get_name(),
         }
     }
 }
@@ -783,6 +879,14 @@ impl Command {
         })
     }
 
+    /// Constructs a ExtraRequirements Command of self with the given requirements
+    pub fn with_extra_requirements(self, subsystems: Requirements) -> Self {
+        Self::ExtraRequirments(ExtraRequirementsCommand {
+            command: Box::new(self),
+            requirements: subsystems.iter().map(|s| s.suid()).collect(),
+        })
+    }
+
     /// Constructs a Wait Command that will wait for the given seconds
     pub fn wait_for(duration: Duration) -> Self {
         Self::Wait(WaitCommand {
@@ -798,11 +902,54 @@ impl Command {
 
     /// Creates an empty command with no requirements
     pub fn empty() -> Self {
-        CommandBuilder::start_only(|| {}, vec![])
+        CommandBuilder::init_only(|| {}, &[])
+    }
+
+    /// Creates a command that will run the given commands in "parallel" every cycle.
+    /// This command will adopt all requirements of the given commands.
+    ///
+    /// This command will finish when all of the given commands finish.
+    ///
+    /// The commands do not actually run in parallel,
+    /// they run sequentially in the order they are given but they are all run every cycle
+    /// unlike a sequential command where only one command is run every cycle.
+    pub fn parallel(commands: Vec<Command>) -> Command {
+        Command::Parallel(ParallelCommand {
+            finished: vec![false; commands.len()],
+            requirements: commands
+                .iter()
+                .flat_map(CommandTrait::get_requirements)
+                .collect(),
+            commands,
+            race: false,
+        })
+    }
+
+    pub fn race(commands: Vec<Command>) -> Command {
+        Command::Parallel(ParallelCommand {
+            finished: vec![false; commands.len()],
+            requirements: commands
+                .iter()
+                .flat_map(CommandTrait::get_requirements)
+                .collect(),
+            commands,
+            race: true,
+        })
+    }
+
+    pub fn sequential(commands: Vec<Command>) -> Command {
+        Command::Sequential(SequentialCommand {
+            requirements: commands
+                .iter()
+                .flat_map(CommandTrait::get_requirements)
+                .collect(),
+            commands,
+            current: 0,
+        })
     }
 
     /// Schedule this command to run
-    /// 
+    ///
     /// # Panics
     /// If this is called in a thread that does not have a command manager.
     /// If you want to handle this error use [`Command::try_schedule`]
@@ -812,7 +959,7 @@ impl Command {
     }
 
     /// Schedule this command to run
-    /// 
+    ///
     /// # Errors
     /// - [`super::manager::WrongThreadError`] if this is called in a thread that does not have a command manager.
     pub fn try_schedule(self) -> Result<(), super::WrongThreadError> {
@@ -875,6 +1022,7 @@ impl From<Command> for Box<dyn CommandTrait> {
             Command::Named(command) => Box::new(command),
             Command::Wait(command) => Box::new(command),
             Command::Proxy(command) => Box::new(command),
+            Command::ExtraRequirments(command) => Box::new(command),
         }
     }
 }

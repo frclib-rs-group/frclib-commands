@@ -1,4 +1,4 @@
-use std::{rc::Rc, fmt::Debug, cell::Cell};
+use std::{cell::Cell, fmt::Debug, rc::Rc};
 
 use super::{Command, CommandIndex};
 
@@ -15,7 +15,7 @@ impl<F: Fn() -> bool> BooleanSupplier for F {
 pub(crate) struct ConditionalScheduler {
     condition: Condition,
     command_slot: Option<Command>,
-    idx_slot: Option<CommandIndex>
+    idx_slot: Option<CommandIndex>,
 }
 impl ConditionalScheduler {
     #[must_use]
@@ -23,12 +23,14 @@ impl ConditionalScheduler {
         Self {
             condition,
             command_slot: Some(command),
-            idx_slot: None
+            idx_slot: None,
         }
     }
     pub fn exchange(&mut self, idx: CommandIndex) -> Command {
         self.idx_slot = Some(idx);
-        self.command_slot.take().expect("ConditionalScheduler::exchange called twice")
+        self.command_slot
+            .take()
+            .expect("ConditionalScheduler::exchange called twice")
     }
     pub fn poll(&mut self) -> Option<CommandIndex> {
         if self.condition.get_as_boolean() {
@@ -86,7 +88,7 @@ impl Condition {
 
     /// Creates a conditional scheduler that will run the given command on the rising edge of the condition.
     /// The command will only run once per rising edge.
-    /// 
+    ///
     /// # Panics
     /// Panics if the conditional scheduler cannot be added to the scheduler manager
     /// due to being on a different thread.
@@ -109,7 +111,7 @@ impl Condition {
 
     /// Creates a conditional scheduler that will run the given command on the falling edge of the condition.
     /// The command will only run once per falling edge.
-    /// 
+    ///
     /// # Panics
     /// Panics if the conditional scheduler cannot be added to the scheduler manager
     /// due to being on a different thread.
