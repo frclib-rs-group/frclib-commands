@@ -1,10 +1,25 @@
-use crate::clone_mv;
+
+use std::{cell::RefCell, sync::atomic::{AtomicBool, Ordering}, rc::Rc};
+
+use crate::conditions::Condition;
+
+
 
 #[allow(dead_code, clippy::collection_is_never_read)]
 #[test]
 fn test_manager() {
+    use crate::clone_mv;
     use super::*;
     use std::time::Duration;
+    thread_local! {
+        static TEST_MARKERS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    }
+
+    fn add_marker(marker: &str) {
+        TEST_MARKERS.with(|markers| {
+            markers.borrow_mut().push(marker.to_owned());
+        });
+    }
 
     #[derive(Debug, Clone)]
     struct TestCommand {
@@ -12,7 +27,12 @@ fn test_manager() {
         start: bool,
         end: bool,
     }
-    impl CommandTrait for TestCommand {}
+    impl CommandTrait for TestCommand {
+        fn is_finished(&mut self) -> bool {
+            add_marker("custom_command_is_finished");
+            true
+        }
+    }
 
     struct TestSubsystem {
         integer: i32,
@@ -28,11 +48,13 @@ fn test_manager() {
             }
         }
 
-        fn periodic(&self, period: Duration) {
-            println!("Periodic: {period:?}");
+        fn periodic(&self, _: Duration) {
+            add_marker("subsystem_periodic");
         }
 
-        fn log(&self) {}
+        fn log(&self) {
+            add_marker("subsystem_log");
+        }
     }
 
     struct DummySubsystem;
@@ -46,9 +68,7 @@ fn test_manager() {
     let subsystem = SubsystemCell::<TestSubsystem>::generate(&mut manager);
     let dummy_subsystem = SubsystemCell::<DummySubsystem>::generate(&mut manager);
 
-    for _ in 0..5 {
-        println!("{:?}", subsystem.suid())
-    }
+    assert_eq!(subsystem.suid(), subsystem.suid());
 
     let command = Command::Custom(Box::new(TestCommand {
         name: "Test".to_owned(),
@@ -65,18 +85,72 @@ fn test_manager() {
         .periodic(clone_mv!(
             variable
                 >> |_period| {
-                    println!("Subsystem name: {:?}", subsystem.name());
-                    println!("Cmd Periodic: {variable:?}");
+                    add_marker("cmd_periodic");
+                    variable.push(0.0);
                 }
         ))
         .init(clone_mv!(
             variable,
-            variable2 >> || println!("Cmd Init: {variable:?} {variable2:?}")
-        ))
-        .end(move |_| println!("Cmd End for subsystem: {:?}", subsystem.name()))
+            variable2 >> || {
+                add_marker("cmd_init");
+                variable.push(0.0);
+                variable2.replace(0);
+            })
+        )
+        .end(move |_| {
+            add_marker("cmd_end");
+        })
+        .is_finished(|| {
+            add_marker("cmd_is_finished");
+            true
+        })
         .with_subsystems(&[&subsystem, &dummy_subsystem])
         .build()
         .schedule();
 
+    let inner_cond = Rc::new(AtomicBool::new(false));
+    let cond = Condition::new(
+        clone_mv!(
+            inner_cond >> || {
+                add_marker("cond_eval");
+                inner_cond.load(Ordering::Relaxed)
+            }
+        )
+    );
+
+    cond.on_true(
+        CommandBuilder::new()
+            .init(move || {
+                add_marker("cond_sched_init");
+            })
+            .build()
+    );
+
     manager.run();
+
+    inner_cond.store(true, Ordering::Relaxed);
+
+    manager.run();
+
+    macro_rules! assert_marker {
+        ($marker:expr) => {
+            assert!(
+                TEST_MARKERS.with(|markers| {
+                    markers.borrow().contains(&$marker.to_owned())
+                }),
+                "Marker {} not found",
+                $marker
+            );
+        };
+    }
+
+    assert_marker!("custom_command_is_finished");
+    assert_marker!("subsystem_periodic");
+    // assert_marker!("subsystem_log"); TODO
+    assert_marker!("cmd_init");
+    assert_marker!("cmd_periodic");
+    assert_marker!("cmd_end");
+    assert_marker!("cmd_is_finished");
+    assert_marker!("cond_eval");
+    assert_marker!("cond_sched_init");
 }

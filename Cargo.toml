@@ -12,12 +12,13 @@ keywords = [
     "Robotics",
     "First",
     "WPILib",
+    "frclib"
 ]
 categories = [
-    "robotics",
-    "hardware"
+    "robotics"
 ]
 
 [dependencies]
 fxhash = "0.2.1"
 thiserror = "1.0.53"
+tracing = "0.1.40"

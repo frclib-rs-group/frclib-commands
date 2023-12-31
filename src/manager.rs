@@ -128,6 +128,7 @@ impl<T: Subsystem + 'static> SubsystemCell<T> {
     #[must_use]
     pub fn generate(manager: &mut CommandManager) -> Self {
         let slf = Self(Box::leak(Box::new(UnsafeCell::new(T::construct()))));
+        tracing::debug!("Constructed subsystem: {}", slf.name());
         manager
             .register_subsystem(&slf, slf.get_mut().default_command())
             .expect("Subsystem already registered");
@@ -235,94 +236,8 @@ impl CommandManager {
             .insert(subsystem.suid(), CommandIndex::DefaultCommand(idx));
         self.interrupt_state
             .insert(CommandIndex::DefaultCommand(idx), false);
+        tracing::debug!("Registered subsystem: {}", subsystem.name());
         Ok(())
-    }
-
-    /// Will run all periodic callbacks, run all conditional schedulers, init all un-initialized commands, and run all commands
-    /// in that order.
-    pub fn run(&mut self) {
-        self.update();
-        self.run_subsystems();
-        self.run_cond_schedulers();
-        self.run_commands();
-    }
-
-    fn run_subsystems(&mut self) {
-        for callback in &mut self.periodic_callbacks {
-            if let Some(last_run) = callback.1 {
-                let dt = last_run.elapsed();
-                callback.0(dt);
-            } else {
-                callback.0(Duration::from_secs(0));
-            }
-            callback.1 = Some(Instant::now());
-        }
-        for (suid, cmd_idx) in &self.subsystem_to_default {
-            if !self.requirements.contains_key(suid) {
-                self.requirements.insert(*suid, *cmd_idx);
-            }
-        }
-    }
-
-    fn run_cond_schedulers(&mut self) {
-        let to_schedule = self
-            .cond_schedulers
-            .iter_mut()
-            .filter_map(ConditionalScheduler::poll)
-            .collect::<Vec<_>>();
-        for index in to_schedule {
-            self.inner_schedule(index);
-        }
-    }
-
-    fn run_commands(&mut self) {
-        let mut to_remove: Vec<usize> = Vec::new();
-        let mut cmds = self.requirements.values().collect::<Vec<&CommandIndex>>();
-        cmds.extend(self.orphaned_commands.iter());
-
-        for index in cmds {
-            if let Some(command) = match index {
-                CommandIndex::Command(cmd) => &mut self.commands[*cmd],
-                CommandIndex::DefaultCommand(cmd) => &mut self.default_commands[*cmd],
-                CommandIndex::PreservedCommand(cmd) => &mut self.preserved_commands[*cmd],
-            } {
-                if self.interrupt_state[index] {
-                    command.end(true);
-                    if let CommandIndex::Command(idx) = *index {
-                        to_remove.push(idx)
-                    }
-                    continue;
-                }
-                if !self.initialized_commands.contains(index) {
-                    command.init();
-                    self.initialized_commands.insert(*index);
-                }
-                //TODO: Add dt to periodic
-                command.periodic(Duration::from_secs(0));
-                if command.is_finished() {
-                    command.end(false);
-                    if let CommandIndex::Command(idx) = *index {
-                        to_remove.push(idx)
-                    }
-                }
-            }
-        }
-        for index in to_remove {
-            self.initialized_commands
-                .remove(&CommandIndex::Command(index));
-            if let Some(cmd) = self.commands.remove(index) {
-                let requirements = cmd.get_requirements();
-                if requirements.is_empty() {
-                    self.orphaned_commands.remove(&CommandIndex::Command(index));
-                } else {
-                    for req in cmd.get_requirements() {
-                        self.requirements.remove(&req);
-                        let idx = self.subsystem_to_default[&req];
-                        self.requirements.insert(req, idx);
-                    }
-                }
-            }
-        }
     }
 
     fn add_command(&mut self, command: Command) -> CommandIndex {
@@ -350,20 +265,6 @@ impl CommandManager {
                 .get_mut(idx)
                 .and_then(Option::as_mut),
         }
-    }
-
-    fn update(&mut self) {
-        MANAGER_QUEUE.with(|queue| {
-            if let Some(queue) = &mut *queue.borrow_mut() {
-                queue.cmd_queue.drain(..).for_each(|command| {
-                    let index = self.add_command(command);
-                    self.inner_schedule(index);
-                });
-                queue.cond_queue.drain(..).for_each(|scheduler| {
-                    self.add_cond_scheduler(scheduler);
-                });
-            }
-        });
     }
 
     pub fn schedule(&mut self, command: Command) {
@@ -405,35 +306,153 @@ impl CommandManager {
         }
     }
 
-    pub fn cancel_all(&mut self) {
-        for maybe_command in &mut self.commands {
-            if let Some(command) = maybe_command.as_mut() {
-                command.end(true);
-            }
+    pub(crate) fn remove_command(&mut self, command_idx: CommandIndex) {
+        self.initialized_commands.remove(&command_idx);
+        self.interrupt_state.remove(&command_idx);
+
+        let command = match self.get_command(command_idx) {
+            Some(command) => command,
+            None => return,
+        };
+        let requirements = command.get_requirements();
+        if let CommandIndex::Command(idx) = command_idx {
+            self.commands[idx] = None;
         }
-        self.commands.clear();
-        self.requirements.clear();
-        self.initialized_commands.clear();
-        self.orphaned_commands.clear();
+        self.orphaned_commands.remove(&command_idx);
+        requirements.iter().for_each(|req| {
+            self.requirements.remove(req);
+        });
     }
 
     pub(crate) fn add_cond_scheduler(&mut self, mut scheduler: ConditionalScheduler) {
         if let Some(idx) = self.commands.iter().position(Option::is_none) {
-            let cmd = scheduler.exchange(CommandIndex::PreservedCommand(idx));
+            let index = CommandIndex::PreservedCommand(idx);
+            self.interrupt_state.insert(index, false);
+            let cmd = scheduler.exchange(index);
             self.preserved_commands[idx] = Some(cmd);
         } else {
-            let cmd = scheduler.exchange(CommandIndex::Command(self.commands.len()));
-            self.commands.push(Some(cmd));
+            let index = CommandIndex::PreservedCommand(self.preserved_commands.len());
+            self.interrupt_state.insert(index, false);
+            let cmd = scheduler.exchange(index);
+            self.preserved_commands.push(Some(cmd));
         }
         self.cond_schedulers.push(scheduler);
     }
 
-    pub fn clear_cond_schedulers(&mut self) {
+    pub fn clear_conditional_schedulers(&mut self) {
         self.cond_schedulers.clear();
     }
 }
+
+/// Action methods
+impl CommandManager {
+    /// Will run all periodic callbacks, run all conditional schedulers, init all un-initialized commands, and run all commands
+    /// in that order.
+    pub fn run(&mut self) {
+        self.update();
+        self.run_subsystems();
+        self.run_cond_schedulers();
+        self.run_commands();
+        tracing::trace!("Ran command scheduler");
+    }
+
+    fn update(&mut self) {
+        MANAGER_QUEUE.with(|queue| {
+            if let Some(queue) = &mut *queue.borrow_mut() {
+                queue.cmd_queue.drain(..).for_each(|command| {
+                    let index = self.add_command(command);
+                    self.inner_schedule(index);
+                });
+                queue.cond_queue.drain(..).for_each(|scheduler| {
+                    self.add_cond_scheduler(scheduler);
+                });
+            }
+        });
+    }
+
+    fn run_subsystems(&mut self) {
+        for callback in &mut self.periodic_callbacks {
+            if let Some(last_run) = callback.1 {
+                let dt = last_run.elapsed();
+                callback.0(dt);
+            } else {
+                callback.0(Duration::from_secs(0));
+            }
+            callback.1 = Some(Instant::now());
+        }
+        for (suid, cmd_idx) in &self.subsystem_to_default {
+            if !self.requirements.contains_key(suid) {
+                self.requirements.insert(*suid, *cmd_idx);
+            }
+        }
+    }
+
+    fn run_cond_schedulers(&mut self) {
+        let to_schedule = self
+            .cond_schedulers
+            .iter_mut()
+            .filter_map(ConditionalScheduler::poll)
+            .collect::<Vec<_>>();
+        for index in to_schedule {
+            self.inner_schedule(index);
+        }
+    }
+
+    fn run_commands(&mut self) {
+        let mut to_remove: Vec<CommandIndex> = Vec::new();
+        let mut cmds = self.requirements.values().collect::<Vec<&CommandIndex>>();
+        cmds.extend(self.orphaned_commands.iter());
+
+        for index in cmds {
+            if let Some(command) = match index {
+                CommandIndex::Command(cmd) => &mut self.commands[*cmd],
+                CommandIndex::DefaultCommand(cmd) => &mut self.default_commands[*cmd],
+                CommandIndex::PreservedCommand(cmd) => &mut self.preserved_commands[*cmd],
+            } {
+                if self.interrupt_state[index] {
+                    command.end(true);
+                    to_remove.push(*index);
+                    continue;
+                }
+                if !self.initialized_commands.contains(index) {
+                    command.init();
+                    self.initialized_commands.insert(*index);
+                }
+                //TODO: Add dt to periodic
+                command.periodic(Duration::from_secs(0));
+                if command.is_finished() {
+                    command.end(false);
+                    to_remove.push(*index);
+                }
+            }
+        }
+        for index in to_remove {
+            self.remove_command(index);
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
 impl Default for CommandManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+impl Drop for CommandManager {
+    fn drop(&mut self) {
+        tracing::debug!("Dropping command manager");
+        MANAGER_QUEUE.with(|queue| {
+            *queue.borrow_mut() = None;
+        });
     }
 }

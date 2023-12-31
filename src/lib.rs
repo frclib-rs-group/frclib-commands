@@ -75,7 +75,7 @@ macro_rules! clone_mv {
     ($($name:ident),* >> |$($arg:ident),*| $body:expr) => {
         {
             // clone the idents
-            $(let $name = $name.clone();)*
+            $(#[allow(unused_mut)] let mut $name = $name.clone();)*
             // return a closure that takes the same arguments as the original closure
             move |$($arg),*| {
                 // call the original closure
@@ -86,7 +86,7 @@ macro_rules! clone_mv {
     ($($name:ident),* >> || $body:expr) => {
         {
             // clone the idents
-            $(let $name = $name.clone();)*
+            $(#[allow(unused_mut)] let mut $name = $name.clone();)*
             // return a closure that takes the same arguments as the original closure
             move || {
                 // call the original closure
@@ -97,7 +97,7 @@ macro_rules! clone_mv {
     ($($name:ident),* >> |_| $body:expr) => {
         {
             // clone the idents
-            $(let $name = $name.clone();)*
+            $(#[allow(unused_mut)] let mut $name = $name.clone();)*
             // return a closure that takes the same arguments as the original closure
             move || {
                 // call the original closure
