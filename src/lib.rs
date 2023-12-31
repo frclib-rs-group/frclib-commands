@@ -18,7 +18,7 @@
 //!          println!("Periodic");
 //!       })
 //!       .build()
-//!       .timeouts(Duration::from_secs(1))
+//!       .timeout(Duration::from_secs(1))
 //!       .schedule();
 //! 
 //!   for _ in 0..10 {
@@ -61,7 +61,7 @@ impl std::error::Error for WrongThreadError {}
 ///
 /// # Examples
 /// ```
-/// use command::CommandBuilder;
+/// use frclib_commands::{CommandBuilder, clone_mv};
 ///
 /// let variable: Vec<f64> = Vec::new();
 /// let variable2: Option<u8> = None;
